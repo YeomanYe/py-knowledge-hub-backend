@@ -8,9 +8,11 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    ForeignKey,
     Integer,
     SmallInteger,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -102,6 +104,137 @@ class DocumentReview(Base):
     reviewed_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime, nullable=True
     )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+
+# ---------------------------------------------------------------- 用户 / 角色 / 权限
+class User(Base):
+    __tablename__ = "kh_user"
+
+    id: Mapped[str] = mapped_column(SnowflakeIdType, primary_key=True)
+    username: Mapped[str] = mapped_column(String(50))
+    password: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    real_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    avatar: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    email_verified: Mapped[int] = mapped_column(SmallInteger, default=1)
+    status: Mapped[int] = mapped_column(SmallInteger, default=1)
+    last_login_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Role(Base):
+    __tablename__ = "kh_role"
+
+    id: Mapped[str] = mapped_column(SnowflakeIdType, primary_key=True)
+    role_name: Mapped[str] = mapped_column(String(50))
+    role_code: Mapped[str] = mapped_column(String(50), unique=True)
+    description: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    status: Mapped[int] = mapped_column(SmallInteger, default=1)
+
+
+class UserRole(Base):
+    __tablename__ = "kh_user_role"
+    __table_args__ = (UniqueConstraint("user_id", "role_id"),)
+
+    id: Mapped[str] = mapped_column(SnowflakeIdType, primary_key=True)
+    user_id: Mapped[str] = mapped_column(SnowflakeIdType, ForeignKey("kh_user.id"))
+    role_id: Mapped[str] = mapped_column(SnowflakeIdType, ForeignKey("kh_role.id"))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+
+class Permission(Base):
+    __tablename__ = "kh_permission"
+
+    id: Mapped[str] = mapped_column(SnowflakeIdType, primary_key=True)
+    parent_id: Mapped[str] = mapped_column(SnowflakeIdType, default="0")
+    permission_name: Mapped[str] = mapped_column(String(50))
+    permission_code: Mapped[str] = mapped_column(String(100), unique=True)
+    permission_type: Mapped[int] = mapped_column(SmallInteger)
+    menu_url: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    api_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    method: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    icon: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    sort: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[int] = mapped_column(SmallInteger, default=1)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class RolePermission(Base):
+    __tablename__ = "kh_role_permission"
+    __table_args__ = (UniqueConstraint("role_id", "permission_id"),)
+
+    id: Mapped[str] = mapped_column(SnowflakeIdType, primary_key=True)
+    role_id: Mapped[str] = mapped_column(SnowflakeIdType, ForeignKey("kh_role.id"))
+    permission_id: Mapped[str] = mapped_column(
+        SnowflakeIdType, ForeignKey("kh_permission.id")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+
+class UserPermission(Base):
+    __tablename__ = "kh_user_permission"
+    __table_args__ = (UniqueConstraint("user_id", "permission_id"),)
+
+    id: Mapped[str] = mapped_column(SnowflakeIdType, primary_key=True)
+    user_id: Mapped[str] = mapped_column(SnowflakeIdType, ForeignKey("kh_user.id"))
+    permission_id: Mapped[str] = mapped_column(
+        SnowflakeIdType, ForeignKey("kh_permission.id")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+
+
+# ---------------------------------------------------------------- 团队
+class Team(Base):
+    __tablename__ = "kh_team"
+
+    id: Mapped[str] = mapped_column(SnowflakeIdType, primary_key=True)
+    team_name: Mapped[str] = mapped_column(String(100))
+    team_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    leader_id: Mapped[str | None] = mapped_column(SnowflakeIdType, nullable=True)
+    parent_id: Mapped[str] = mapped_column(SnowflakeIdType, default="0")
+    sort: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[int] = mapped_column(SmallInteger, default=1)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class TeamMember(Base):
+    __tablename__ = "kh_team_member"
+    __table_args__ = (UniqueConstraint("team_id", "user_id"),)
+
+    id: Mapped[str] = mapped_column(SnowflakeIdType, primary_key=True)
+    team_id: Mapped[str] = mapped_column(SnowflakeIdType, ForeignKey("kh_team.id"))
+    user_id: Mapped[str] = mapped_column(SnowflakeIdType, ForeignKey("kh_user.id"))
+    member_role: Mapped[str] = mapped_column(String(20), default="member")
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, server_default=func.now()
     )
