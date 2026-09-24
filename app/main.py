@@ -52,8 +52,8 @@ def create_app() -> FastAPI:
     app.include_router(users.router)
     app.include_router(roles.router)
     app.include_router(permissions.router)
-    # 公开 tree 先注册，避免被 /teams/{team_id} 抢占
-    app.include_router(teams.public_router)
+    # mine 先注册，避免被 /teams/{team_id} 抢占
+    app.include_router(teams.mine_router)
     app.include_router(teams.router)
     app.include_router(documents.router)
     app.include_router(search.router)

@@ -16,6 +16,7 @@ class DocumentChunk:
     categoryId: str | None = None
     authorId: str | None = None
     teamId: str | None = None
+    isPublic: bool | None = None
     docStatus: int | None = None
     publishTime: str | None = None
     embedding: list[float] | None = None

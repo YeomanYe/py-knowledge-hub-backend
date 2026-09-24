@@ -91,9 +91,11 @@ async def pending_review_count(session: AsyncSession = Depends(get_session)):
 
 @router.get("", dependencies=[DOC_LIST])
 async def find_all(
-    query: QueryDocumentDto = Depends(), session: AsyncSession = Depends(get_session)
+    query: QueryDocumentDto = Depends(),
+    session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
 ):
-    return await _document_service().find_all(session, query)
+    return await _document_service().find_all(session, query, user)
 
 
 @router.put(
@@ -203,8 +205,12 @@ async def reject_review(
 
 
 @router.get("/{document_id}", dependencies=[DOC_LIST])
-async def find_one(document_id: str, session: AsyncSession = Depends(get_session)):
-    return await _document_service().find_one(session, document_id)
+async def find_one(
+    document_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
+):
+    return await _document_service().find_one(session, document_id, True, user)
 
 
 @router.patch(

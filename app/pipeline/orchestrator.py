@@ -112,6 +112,24 @@ class PipelineOrchestrator:
         logger.info("KG 开始建图：type=%s, total=%s", type_, len(docs))
         await self._graph_build_service.build_batch(docs)
 
+    # ------------------------------------------------------------ 可见性
+    async def update_visibility(self, document_id: str) -> None:
+        """已发布文档只改公开/团队时：三端（向量/搜索/图谱）同步可见性，不必重建。"""
+        async with self._session_factory() as session:
+            doc = await self._find_document(session, document_id)
+            if not doc:
+                logger.warning("updateVisibility 文档不存在：documentId=%s", document_id)
+                return
+            vis = {
+                "isPublic": bool(doc.is_public),
+                "authorId": doc.author_id,
+                "teamId": doc.team_id,
+            }
+        await self._vector_index_service.update_visibility(document_id, vis)
+        await self._search_index_service.update_visibility(document_id, vis)
+        await self._graph_build_service.update_visibility(document_id, vis)
+        logger.info("三端可见性已同步：documentId=%s", document_id)
+
     # ------------------------------------------------------------ 内部
     async def _reindex_one(self, doc: PipelineDocument) -> None:
         if not (doc.content or "").strip():
@@ -127,6 +145,7 @@ class PipelineOrchestrator:
             category_id=doc.categoryId,
             author_id=doc.authorId,
             team_id=doc.teamId,
+            is_public=bool(doc.isPublic),
             doc_status=doc.status,
             publish_time=_to_iso(doc.publishTime),
         )
@@ -177,6 +196,7 @@ class PipelineOrchestrator:
             "tags": doc.tags,
             "status": doc.status,
             "isPublic": doc.isPublic,
+            "teamId": doc.teamId,
             "viewCount": doc.viewCount,
             "likeCount": doc.likeCount,
             "commentCount": doc.commentCount,

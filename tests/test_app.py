@@ -39,6 +39,7 @@ def test_routes_registered():
         "/roles/list",
         "/permissions/tree",
         "/teams/tree",
+        "/teams/mine",
         "/teams/page",
         "/documents",
         "/documents/upload/parse",
@@ -48,6 +49,7 @@ def test_routes_registered():
         "/search",
         "/rag/search",
         "/ai/chat",
+        "/ai/chat/stream",
         "/ai/sessions",
         "/ai/sessions/{session_id}/messages",
         "/graph/overview",
@@ -72,8 +74,8 @@ def test_protected_route_401():
         assert response.status_code == 401
 
 
-def test_teams_tree_public():
+def test_teams_mine_requires_auth():
     with TestClient(app) as client:
-        response = client.get("/teams/tree")
-        # 公开路由无需登录：数据库不可用时内部报错也是 500/服务异常，而非 401
-        assert response.status_code != 401
+        # /teams/mine 登录即可访问：无 token → 401
+        response = client.get("/teams/mine")
+        assert response.status_code == 401

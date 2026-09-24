@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..common import next_snowflake_id
 from ..config import get_settings
+from ..document_access import can_write_document
 from ..models import (
     Document,
     DocumentReview,
@@ -47,6 +48,8 @@ class DocumentReviewService:
         self, session: AsyncSession, document_id: str, actor: dict | None = None
     ) -> Document:
         doc = await self._find_document_or_throw(session, document_id)
+        if actor is not None and not can_write_document(doc, actor):
+            raise HTTPException(403, "无权提交该文档审核")
 
         if not self._can_submit_review(doc.status):
             raise HTTPException(400, "只有草稿或已发布状态的文档才能提交审核")

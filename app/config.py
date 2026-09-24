@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     rerank_api_key: str | None = None
     rerank_base_url: str = "https://dashscope.aliyuncs.com"
     ai_chat_timeout_ms: int = 60000
+    # rerank 相关度低于此值的块丢掉（0–1）。0 表示不过滤。
+    rag_min_score: float = 0.4
 
     # LLM（OpenAI 兼容）
     openai_api_key: str | None = None
@@ -73,6 +75,24 @@ class Settings(BaseSettings):
     kg_llm_timeout_ms: int = 120000
     kg_max_entities: int = 12
     kg_max_relations: int = 15
+    # 流式问答开启模型思考（qwen-plus 兼容接口 extra enable_thinking）
+    llm_enable_thinking: bool = True
+
+    # 联网搜索（Bocha；不配则工具返回提示）
+    bocha_api_key: str | None = None
+
+    # 对话短期记忆（Redis 热窗口，miss 时从 Postgres 回填）
+    chat_short_memory_ttl_seconds: int = 86400
+    chat_short_memory_max_messages: int = 20
+    chat_short_memory_key_prefix: str = "kh:chat"
+
+    # 检索改写 / 意图路由
+    ai_query_rewrite_timeout_ms: int = 15000
+
+    # 对话长期记忆（Mem0；不配则跳过）
+    mem0_api_key: str | None = None
+    mem0_host: str = "https://api.mem0.ai"
+    mem0_top_k: int = 5
 
     # Elasticsearch
     elasticsearch_enabled: bool = True

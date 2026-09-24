@@ -110,7 +110,10 @@ class Container:
     def user_service(self):
         from .services.user_service import UserService
 
-        return self._get("user_service", lambda: UserService(self.permission_service()))
+        return self._get(
+            "user_service",
+            lambda: UserService(self.permission_service(), self.team_service()),
+        )
 
     def permission_service(self):
         from .services.permission_service import PermissionService
@@ -146,6 +149,7 @@ class Container:
                 rustfs=self.rustfs(),
                 pipeline_publisher=self.pipeline_publisher(),
                 review_service=self.review_service(),
+                orchestrator=self.orchestrator(),
             ),
         )
 
@@ -179,17 +183,71 @@ class Container:
             ),
         )
 
+    def chat_short_memory(self):
+        from .ai.chat_short_memory import ChatShortMemoryService
+
+        return self._get(
+            "chat_short_memory",
+            lambda: ChatShortMemoryService(self.redis()),
+        )
+
+    def chat_long_memory(self):
+        from .ai.chat_long_memory import ChatLongMemoryService
+
+        return self._get("chat_long_memory", ChatLongMemoryService)
+
+    def query_rewrite(self):
+        from .ai.query_rewrite import ChatQueryRewriteService
+
+        return self._get("query_rewrite", ChatQueryRewriteService)
+
+    def web_search(self):
+        from .ai.web_search import WebSearchService
+
+        return self._get("web_search", WebSearchService)
+
     def chat_sessions(self):
         from .ai.chat_session import ChatSessionService
 
-        return self._get("chat_sessions", lambda: ChatSessionService(SessionLocal))
+        return self._get(
+            "chat_sessions",
+            lambda: ChatSessionService(
+                SessionLocal,
+                short_memory=self.chat_short_memory(),
+                long_memory=self.chat_long_memory(),
+            ),
+        )
 
     def ai_chat(self):
         from .ai.ai_chat import AiChatService
 
         return self._get(
             "ai_chat",
-            lambda: AiChatService(self.hybrid_retrieval(), self.chat_sessions()),
+            lambda: AiChatService(
+                self.hybrid_retrieval(),
+                self.chat_sessions(),
+                self.chat_short_memory(),
+                self.chat_long_memory(),
+                self.query_rewrite(),
+                self.web_search(),
+                self.graph_build_service(),
+            ),
+        )
+
+    def ai_stream(self):
+        from .ai.chat_stream import AiStreamService
+
+        return self._get(
+            "ai_stream",
+            lambda: AiStreamService(
+                self.hybrid_retrieval(),
+                self.chat_sessions(),
+                self.web_search(),
+                self.chat_short_memory(),
+                self.chat_long_memory(),
+                self.query_rewrite(),
+                self.graph_build_service(),
+            ),
         )
 
     # ------------------------------------------------------------ 生命周期

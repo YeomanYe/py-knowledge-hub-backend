@@ -1,4 +1,7 @@
-"""RAG 向量索引（Elasticsearch kh_chunk，dense_vector + IK）。"""
+"""RAG 向量索引（Elasticsearch kh_chunk，dense_vector + IK）。
+
+检索按当前用户可见范围过滤（公开 ∪ 自己写的 ∪ 所在团队）。
+"""
 from __future__ import annotations
 
 import datetime
@@ -7,6 +10,12 @@ import logging
 from elasticsearch import AsyncElasticsearch, NotFoundError
 
 from ..config import get_settings
+from ..document_access import (
+    ES_CHUNK_VISIBILITY_FIELDS,
+    DocumentAccessScope,
+    es_visibility_filter,
+    wrap_es_query,
+)
 from .types import ChunkHit, DocumentChunk
 
 CHUNK_INDEX = "kh_chunk"
@@ -53,6 +62,7 @@ class VectorIndexService:
             return
 
         await self._create_index_if_not_exists()
+        await self._ensure_visibility_mapping()
 
         operations: list[dict] = []
         for chunk in chunks:
@@ -73,7 +83,40 @@ class VectorIndexService:
 
         logger.info("ES 批量索引成功：%s chunks → %s", len(chunks), CHUNK_INDEX)
 
-    async def keyword_search(self, query: str, top_k: int = 20) -> list[ChunkHit]:
+    async def update_visibility(
+        self,
+        document_id: str,
+        vis: dict,
+    ) -> None:
+        """已发布文档只改公开/团队时，批量改 chunk 可见性，不必重算向量。"""
+        if self.es is None:
+            logger.warning("跳过向量可见性更新（ES 不可用）：documentId=%s", document_id)
+            return
+        try:
+            await self.es.update_by_query(
+                index=CHUNK_INDEX,
+                refresh=True,
+                query={"term": {"document_id": document_id}},
+                script={
+                    "source": (
+                        "ctx._source.is_public = params.is_public; "
+                        "ctx._source.team_id = params.team_id; "
+                        "ctx._source.author_id = params.author_id;"
+                    ),
+                    "params": {
+                        "is_public": vis.get("isPublic", False),
+                        "team_id": vis.get("teamId"),
+                        "author_id": vis.get("authorId"),
+                    },
+                },
+            )
+            logger.info("向量索引可见性已更新：documentId=%s", document_id)
+        except Exception as err:
+            logger.warning("向量索引可见性更新失败：documentId=%s, %s", document_id, err)
+
+    async def keyword_search(
+        self, query: str, top_k: int = 20, scope: DocumentAccessScope | None = None
+    ) -> list[ChunkHit]:
         if self.es is None:
             logger.warning("跳过关键词检索（ES 不可用）")
             return []
@@ -81,17 +124,21 @@ class VectorIndexService:
         if not trimmed:
             return []
         k = self._clamp_top_k(top_k)
+        vis = es_visibility_filter(scope, ES_CHUNK_VISIBILITY_FIELDS) if scope else None
         try:
             response = await self.es.search(
                 index=CHUNK_INDEX,
                 size=k,
-                query={
-                    "multi_match": {
-                        "query": trimmed,
-                        "fields": ["document_title^2", "content"],
-                        "analyzer": "ik_smart",
-                    }
-                },
+                query=wrap_es_query(
+                    {
+                        "multi_match": {
+                            "query": trimmed,
+                            "fields": ["document_title^2", "content"],
+                            "analyzer": "ik_smart",
+                        }
+                    },
+                    vis,
+                ),
                 _source=["chunk_id", "document_id", "document_title", "content", "heading"],
             )
             return self._map_hits(response["hits"]["hits"])
@@ -99,23 +146,32 @@ class VectorIndexService:
             logger.warning("关键词检索失败：%s", err)
             return []
 
-    async def knn_search(self, query_vector: list[float], top_k: int = 20) -> list[ChunkHit]:
+    async def knn_search(
+        self,
+        query_vector: list[float],
+        top_k: int = 20,
+        scope: DocumentAccessScope | None = None,
+    ) -> list[ChunkHit]:
         if self.es is None:
             logger.warning("跳过向量检索（ES 不可用）")
             return []
         if not query_vector:
             return []
         k = self._clamp_top_k(top_k)
+        vis = es_visibility_filter(scope, ES_CHUNK_VISIBILITY_FIELDS) if scope else None
         try:
+            knn: dict = {
+                "field": "embedding",
+                "query_vector": query_vector,
+                "k": k,
+                "num_candidates": max(k * 10, 50),
+            }
+            if vis:
+                knn["filter"] = vis
             response = await self.es.search(
                 index=CHUNK_INDEX,
                 size=k,
-                knn={
-                    "field": "embedding",
-                    "query_vector": query_vector,
-                    "k": k,
-                    "num_candidates": max(k * 10, 50),
-                },
+                knn=knn,
                 _source=["chunk_id", "document_id", "document_title", "content", "heading"],
             )
             return self._map_hits(response["hits"]["hits"])
@@ -129,13 +185,14 @@ class VectorIndexService:
         query_vector: list[float] | None = None,
         hybrid_top_k: int = 20,
         rrf_c: int = 60,
+        scope: DocumentAccessScope | None = None,
     ) -> list[ChunkHit]:
         hybrid_top_k = self._clamp_top_k(hybrid_top_k)
         rrf_c = rrf_c if rrf_c and rrf_c > 0 else 60
 
-        keyword_task = self.keyword_search(query, hybrid_top_k)
+        keyword_task = self.keyword_search(query, hybrid_top_k, scope)
         vector_task = (
-            self.knn_search(query_vector, hybrid_top_k)
+            self.knn_search(query_vector, hybrid_top_k, scope)
             if query_vector
             else None
         )
@@ -236,6 +293,7 @@ class VectorIndexService:
                         "category_id": {"type": "keyword"},
                         "author_id": {"type": "keyword"},
                         "team_id": {"type": "keyword"},
+                        "is_public": {"type": "boolean"},
                         "doc_status": {"type": "integer"},
                         "publish_time": {"type": "date"},
                         "indexed_at": {"type": "date"},
@@ -255,6 +313,21 @@ class VectorIndexService:
             logger.error("ES 索引创建失败：%s", err)
             raise
 
+    async def _ensure_visibility_mapping(self) -> None:
+        if self.es is None:
+            return
+        try:
+            await self.es.indices.put_mapping(
+                index=CHUNK_INDEX,
+                properties={
+                    "is_public": {"type": "boolean"},
+                    "author_id": {"type": "keyword"},
+                    "team_id": {"type": "keyword"},
+                },
+            )
+        except Exception as err:
+            logger.warning("kh_chunk 可见性 mapping 更新失败：%s", err)
+
     def _build_doc_map(self, chunk: DocumentChunk) -> dict:
         doc: dict = {
             "chunk_id": chunk.chunkId,
@@ -267,6 +340,7 @@ class VectorIndexService:
             "category_id": chunk.categoryId,
             "author_id": chunk.authorId,
             "team_id": chunk.teamId,
+            "is_public": chunk.isPublic or False,
             "doc_status": chunk.docStatus,
             "publish_time": chunk.publishTime,
             "indexed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),

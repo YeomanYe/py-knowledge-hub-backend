@@ -15,8 +15,15 @@ DEFAULT_TITLE = "新对话"
 
 
 class ChatSessionService:
-    def __init__(self, session_factory: async_sessionmaker) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker,
+        short_memory=None,
+        long_memory=None,
+    ) -> None:
         self._session_factory = session_factory
+        self._short_memory = short_memory
+        self._long_memory = long_memory
 
     async def page_mine(self, user_id: str, page: int = 1, page_size: int = 20) -> dict:
         page = page or 1
@@ -60,12 +67,29 @@ class ChatSessionService:
             await db.refresh(session)
             return session
 
+    async def touch_title(
+        self, user_id: str, session_id: str, question: str
+    ) -> AiSession:
+        """仍为默认标题时，用首问覆盖。"""
+        async with self._session_factory() as db:
+            session = await self._get_owned(db, user_id, session_id)
+            if session.title == DEFAULT_TITLE:
+                session.title = _title_from_question(question)
+            await db.commit()
+            await db.refresh(session)
+            return session
+
     async def remove(self, user_id: str, session_id: str) -> dict:
         async with self._session_factory() as db:
             await self._get_owned(db, user_id, session_id)
             await db.execute(delete(AiMessage).where(AiMessage.session_id == session_id))
             await db.execute(delete(AiSession).where(AiSession.id == session_id))
             await db.commit()
+        # 删除会话同时清掉短期记忆与 Mem0 会话层
+        if self._short_memory is not None:
+            await self._short_memory.clear(user_id, session_id)
+        if self._long_memory is not None:
+            await self._long_memory.clear_session(user_id, session_id)
         return {"message": "已删除"}
 
     async def list_messages(self, user_id: str, session_id: str) -> list[dict]:
@@ -78,6 +102,21 @@ class ChatSessionService:
             )
             messages = (await db.execute(stmt)).scalars().all()
         return [self._message_to_dict(m) for m in messages]
+
+    async def list_recent_messages(
+        self, user_id: str, session_id: str, limit: int
+    ) -> list:
+        """最近 N 条，时间正序，供 Redis miss 时回填工作窗口。"""
+        async with self._session_factory() as db:
+            await self._get_owned(db, user_id, session_id)
+            stmt = (
+                select(AiMessage)
+                .where(AiMessage.session_id == session_id)
+                .order_by(AiMessage.created_at.desc(), AiMessage.id.desc())
+                .limit(max(limit, 1))
+            )
+            messages = (await db.execute(stmt)).scalars().all()
+        return list(reversed(messages))
 
     async def append_turn(
         self,
@@ -122,7 +161,7 @@ class ChatSessionService:
                     session_id=session.id,
                     role="assistant",
                     content=answer,
-                    sources=[s.__dict__ for s in sources] if sources else None,
+                    sources=[_source_to_dict(s) for s in sources] if sources else None,
                 )
             )
             await db.commit()
@@ -158,6 +197,10 @@ class ChatSessionService:
             "sources": m.sources,
             "createdAt": m.created_at.isoformat() if m.created_at else None,
         }
+
+
+def _source_to_dict(s) -> dict:
+    return s.__dict__ if hasattr(s, "__dict__") else dict(s)
 
 
 def _title_from_question(question: str) -> str:

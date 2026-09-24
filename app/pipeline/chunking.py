@@ -43,6 +43,7 @@ class ChunkingService:
         category_id: str | None = None,
         author_id: str | None = None,
         team_id: str | None = None,
+        is_public: bool | None = None,
         doc_status: int | None = None,
         publish_time: str | None = None,
     ) -> list[DocumentChunk]:
@@ -80,6 +81,7 @@ class ChunkingService:
                     categoryId=category_id,
                     authorId=author_id,
                     teamId=team_id,
+                    isPublic=is_public,
                     docStatus=doc_status,
                     publishTime=publish_time,
                 )

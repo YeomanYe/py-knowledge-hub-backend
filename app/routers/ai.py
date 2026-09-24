@@ -1,4 +1,4 @@
-"""AI / RAG 接口（混合检索 + 会话）。"""
+"""AI / RAG 接口（混合检索 + 对话 + 流式 + 会话）。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -7,6 +7,7 @@ from ..container import Container
 from ..deps import get_current_user, require_permission
 from ..schemas import (
     ChatDto,
+    ChatStreamDto,
     CreateSessionDto,
     QuerySessionDto,
     RagSearchDto,
@@ -19,9 +20,11 @@ SEARCH_PERM = Depends(require_permission("search"))
 
 
 @router.post("/rag/search", dependencies=[SEARCH_PERM])
-async def rag_search(dto: RagSearchDto):
+async def rag_search(
+    dto: RagSearchDto, user: dict = Depends(get_current_user)
+):
     hits = await Container.instance().hybrid_retrieval().retrieve(
-        dto.query.strip(), dto.topK
+        dto.query.strip(), dto.topK, user
     )
     return [h.__dict__ for h in hits]
 
@@ -31,8 +34,15 @@ async def ai_chat(
     dto: ChatDto, user: dict = Depends(get_current_user)
 ):
     return await Container.instance().ai_chat().chat(
-        dto.content, dto.topK, user["userId"], dto.sessionId
+        dto.content, dto.topK, user, dto.sessionId
     )
+
+
+@router.post("/ai/chat/stream", dependencies=[SEARCH_PERM])
+async def ai_chat_stream(
+    dto: ChatStreamDto, user: dict = Depends(get_current_user)
+):
+    return Container.instance().ai_stream().stream_chat(dto, user)
 
 
 @router.get("/ai/sessions", dependencies=[SEARCH_PERM])

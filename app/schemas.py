@@ -269,6 +269,23 @@ class ChatDto(ApiModel):
     topK: int = Field(default=5, ge=1, le=10)
 
 
+class ChatStreamMessage(ApiModel):
+    """useChat 格式：role + parts[{type,text}]。"""
+
+    role: str
+    parts: list[dict] | None = None
+    content: str | None = None
+
+
+class ChatStreamDto(ApiModel):
+    sessionId: str | None = None
+    messages: list[ChatStreamMessage] | None = None
+    topK: int = Field(default=5, ge=1, le=10)
+    id: str | None = None
+    trigger: str | None = None
+    messageId: str | None = None
+
+
 class RagSearchDto(ApiModel):
     query: str = Field(min_length=1)
     topK: int = Field(default=5, ge=1, le=20)

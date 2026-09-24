@@ -17,6 +17,7 @@ from ..schemas import (
     UpdateUserDto,
 )
 from .permission_service import PermissionService
+from .team_service import TeamService
 
 
 def hash_password(password: str) -> str:
@@ -35,8 +36,11 @@ def _unauthorized(message: str = "未登录或 token 已失效") -> HTTPExceptio
 
 
 class UserService:
-    def __init__(self, permission_service: PermissionService) -> None:
+    def __init__(
+        self, permission_service: PermissionService, team_service: TeamService
+    ) -> None:
         self._permission_service = permission_service
+        self._team_service = team_service
 
     # ------------------------------------------------------------ 基础查询
     async def find_by_email(self, session: AsyncSession, email: str) -> User | None:
@@ -80,7 +84,11 @@ class UserService:
         }
 
     def to_auth_user(
-        self, user: User, roles: list[str], permissions: list[str]
+        self,
+        user: User,
+        roles: list[str],
+        permissions: list[str],
+        team_ids: list[str] | None = None,
     ) -> dict:
         return {
             "userId": user.id,
@@ -90,6 +98,7 @@ class UserService:
             "avatar": user.avatar,
             "roles": roles,
             "permissions": permissions,
+            "teamIds": team_ids or [],
         }
 
     async def build_auth_user(self, session: AsyncSession, user_id: str) -> dict:
@@ -100,7 +109,8 @@ class UserService:
         permissions = await self._permission_service.get_user_permission_codes(
             session, user_id
         )
-        return self.to_auth_user(user, roles, permissions)
+        team_ids = await self._team_service.list_accessible_team_ids(session, user_id)
+        return self.to_auth_user(user, roles, permissions, team_ids)
 
     async def validate_credentials(
         self, session: AsyncSession, username: str, password: str
@@ -118,7 +128,8 @@ class UserService:
         permissions = await self._permission_service.get_user_permission_codes(
             session, user.id
         )
-        return self.to_auth_user(user, roles, permissions)
+        team_ids = await self._team_service.list_accessible_team_ids(session, user.id)
+        return self.to_auth_user(user, roles, permissions, team_ids)
 
     # ------------------------------------------------------------ 注册 / 创建
     async def register(

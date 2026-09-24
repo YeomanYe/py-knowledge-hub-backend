@@ -185,6 +185,41 @@ class TeamService:
             for row in rows
         ]
 
+    async def list_mine(self, session: AsyncSession, user_id: str) -> list[dict]:
+        """当前用户所在团队（含担任负责人的），登录即可。"""
+        ids = await self.list_accessible_team_ids(session, user_id)
+        if not ids:
+            return []
+        stmt = (
+            select(Team)
+            .where(Team.id.in_(ids), Team.deleted.is_(False))
+            .order_by(Team.sort.asc(), Team.created_at.asc())
+        )
+        return [_to_dict(t) for t in (await session.execute(stmt)).scalars().all()]
+
+    async def list_accessible_team_ids(
+        self, session: AsyncSession, user_id: str
+    ) -> list[str]:
+        """当前用户可见的团队：成员表 ∪ 担任 leader（两者都过滤软删团队）。"""
+        stmt = (
+            select(TeamMember.team_id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(
+                TeamMember.user_id == user_id,
+                Team.deleted.is_(False),
+                Team.status == 1,
+            )
+        )
+        member_ids = set((await session.execute(stmt)).scalars().all())
+
+        leader_stmt = (
+            select(Team.id)
+            .where(Team.leader_id == user_id, Team.deleted.is_(False), Team.status == 1)
+        )
+        leader_ids = set((await session.execute(leader_stmt)).scalars().all())
+
+        return sorted(member_ids | leader_ids)
+
     async def _find_by_id_or_throw(self, session: AsyncSession, team_id: str) -> Team:
         stmt = select(Team).where(Team.id == team_id, Team.deleted.is_(False))
         team = (await session.execute(stmt)).scalars().first()

@@ -1,4 +1,7 @@
-"""文档级全文搜索索引（Elasticsearch kh_document）。"""
+"""文档级全文搜索索引（Elasticsearch kh_document）。
+
+检索按当前用户可见范围过滤（公开 ∪ 自己写的 ∪ 所在团队）。
+"""
 from __future__ import annotations
 
 import datetime
@@ -7,6 +10,11 @@ import logging
 from elasticsearch import AsyncElasticsearch
 
 from ..config import get_settings
+from ..document_access import (
+    ES_DOC_VISIBILITY_FIELDS,
+    DocumentAccessScope,
+    es_visibility_filter,
+)
 
 ES_INDEX = "kh_document"
 
@@ -38,10 +46,37 @@ class SearchIndexService:
             logger.warning("跳过搜索索引写入（ES 不可用）：documentId=%s", doc.get("id"))
             return
 
+        await self._ensure_es_index()
+        await self._ensure_visibility_mapping()
+
         doc_id = str(doc.get("id"))
         body = {**doc, "indexedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         await self.es.index(index=ES_INDEX, id=doc_id, document=body, refresh=True)
         logger.info("搜索索引已写入 ES：documentId=%s", doc_id)
+
+    async def update_visibility(
+        self,
+        document_id: str,
+        vis: dict,
+    ) -> None:
+        """已发布文档只改公开/团队时，补写可见性字段，不必整篇重索引。"""
+        if self.es is None:
+            logger.warning("跳过搜索可见性更新（ES 不可用）：documentId=%s", document_id)
+            return
+        try:
+            await self.es.update(
+                index=ES_INDEX,
+                id=document_id,
+                doc={
+                    "isPublic": vis.get("isPublic", False),
+                    "teamId": vis.get("teamId"),
+                    "authorId": vis.get("authorId"),
+                },
+                refresh=True,
+            )
+            logger.info("搜索索引可见性已更新：documentId=%s", document_id)
+        except Exception as err:
+            logger.warning("搜索索引可见性更新失败：documentId=%s, %s", document_id, err)
 
     async def delete_document(self, document_id: str) -> None:
         if self.es is None:
@@ -61,6 +96,7 @@ class SearchIndexService:
         page_size: int = 10,
         category_id: str | None = None,
         author_id: str | None = None,
+        scope: DocumentAccessScope | None = None,
     ) -> dict:
         page = page or 1
         page_size = min(page_size or 10, 50)
@@ -71,6 +107,9 @@ class SearchIndexService:
             return {"items": [], "total": 0, "page": page, "pageSize": page_size}
 
         filters: list[dict] = []
+        vis = es_visibility_filter(scope, ES_DOC_VISIBILITY_FIELDS) if scope else None
+        if vis:
+            filters.append(vis)
         if category_id:
             filters.append({"term": {"categoryId": category_id}})
         if author_id:
@@ -132,6 +171,8 @@ class SearchIndexService:
                         "categoryId": src.get("categoryId"),
                         "tags": src.get("tags"),
                         "authorId": src.get("authorId"),
+                        "teamId": src.get("teamId"),
+                        "isPublic": src.get("isPublic"),
                         "status": src.get("status"),
                         "publishTime": src.get("publishTime"),
                         "score": hit.get("_score") or 0,
@@ -166,8 +207,26 @@ class SearchIndexService:
                     "status": {"type": "integer"},
                     "categoryId": {"type": "keyword"},
                     "authorId": {"type": "keyword"},
+                    "teamId": {"type": "keyword"},
+                    "isPublic": {"type": "boolean"},
                     "publishTime": {"type": "date"},
                 }
             },
         )
         logger.info("已创建 ES 索引：%s", ES_INDEX)
+
+    async def _ensure_visibility_mapping(self) -> None:
+        """已有索引补可见性字段（旧 mapping 没有 isPublic）。"""
+        if self.es is None:
+            return
+        try:
+            await self.es.indices.put_mapping(
+                index=ES_INDEX,
+                properties={
+                    "isPublic": {"type": "boolean"},
+                    "teamId": {"type": "keyword"},
+                    "authorId": {"type": "keyword"},
+                },
+            )
+        except Exception as err:
+            logger.warning("kh_document 可见性 mapping 更新失败：%s", err)

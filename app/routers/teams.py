@@ -1,4 +1,8 @@
-"""团队管理接口。"""
+"""团队管理接口。
+
+- GET /teams/mine：登录即可，返回当前用户所在团队（含担任负责人的）
+- 其余接口全部 ADMIN
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
@@ -6,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..container import Container
 from ..database import get_session
-from ..deps import require_permission, require_roles
+from ..deps import get_current_user, require_permission, require_roles
 from ..schemas import CreateTeamDto, QueryTeamDto, UpdateTeamDto
 
 router = APIRouter(
@@ -15,20 +19,20 @@ router = APIRouter(
     dependencies=[Depends(require_roles("ROLE_ADMIN"))],
 )
 
-# 公开路由：团队树（无需登录）
-public_router = APIRouter(prefix="/teams", tags=["teams"])
+# 登录即可访问的轻量路由
+mine_router = APIRouter(prefix="/teams", tags=["teams"])
 
 
 def _team_service():
     return Container.instance().team_service()
 
 
-@public_router.get("/tree")
-async def get_tree(
-    root_only: str | None = Query(default=None),
+@mine_router.get("/mine")
+async def list_mine(
     session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
 ):
-    return await _team_service().get_tree(session, root_only == "true")
+    return await _team_service().list_mine(session, user["userId"])
 
 
 @router.post("", dependencies=[Depends(require_permission("system:team"))])
@@ -54,6 +58,14 @@ async def page(
     query: QueryTeamDto = Depends(), session: AsyncSession = Depends(get_session)
 ):
     return await _team_service().page(session, query)
+
+
+@router.get("/tree", dependencies=[Depends(require_permission("system:team"))])
+async def get_tree(
+    root_only: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    return await _team_service().get_tree(session, root_only == "true")
 
 
 @router.get("/{team_id}", dependencies=[Depends(require_permission("system:team"))])

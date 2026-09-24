@@ -260,7 +260,23 @@ def test_permission_denied_for_normal_user(client: TestClient):
     assert response.status_code == 403
 
 
-def test_teams_tree_public_data(client: TestClient):
-    response = client.get("/teams/tree")
-    assert response.status_code == 200
-    assert isinstance(response.json(), list)
+def test_teams_mine_and_tree(client: TestClient):
+    """/teams/mine 登录即可；/teams/tree 需要管理员。"""
+    auth = _register_and_login(client, f"it_teams_{TS}")
+    headers = _auth_headers(auth["accessToken"])
+
+    mine = client.get("/teams/mine", headers=headers)
+    assert mine.status_code == 200, mine.text
+    assert isinstance(mine.json(), list)
+
+    tree = client.get("/teams/tree", headers=headers)
+    assert tree.status_code == 403, tree.text
+
+    # 管理员可看 tree
+    admin = client.post("/auth/login", json={"username": "admin", "password": "123456"})
+    assert admin.status_code == 200, admin.text
+    admin_tree = client.get(
+        "/teams/tree", headers=_auth_headers(admin.json()["accessToken"])
+    )
+    assert admin_tree.status_code == 200, admin_tree.text
+    assert isinstance(admin_tree.json(), list)

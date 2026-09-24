@@ -7,10 +7,15 @@ import logging
 import re
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..common import next_snowflake_id
+from ..document_access import (
+    can_read_document,
+    can_write_document,
+    access_from_user,
+)
 from ..models import Document, DocumentStatus
 from ..mongo_models import DocumentContentRepo, new_content_id
 from ..storage import RustfsService
@@ -63,12 +68,14 @@ class DocumentService:
         rustfs: RustfsService,
         pipeline_publisher,
         review_service: DocumentReviewService,
+        orchestrator=None,
     ) -> None:
         self._content_repo = content_repo
         self._file_parser_service = file_parser_service
         self._rustfs = rustfs
         self._pipeline_publisher = pipeline_publisher
         self._review_service = review_service
+        self._orchestrator = orchestrator
 
     # ------------------------------------------------------------ 创建
     async def create(self, session: AsyncSession, dto, actor: dict) -> dict:
@@ -129,11 +136,36 @@ class DocumentService:
             raise
 
     # ------------------------------------------------------------ 查询
-    async def find_all(self, session: AsyncSession, query) -> dict:
+    async def find_all(self, session: AsyncSession, query, user: dict | None = None) -> dict:
         page = query.page or 1
         page_size = query.pageSize or 20
         stmt = select(Document).where(Document.deleted.is_(False))
         total_stmt = select(func.count(Document.id)).where(Document.deleted.is_(False))
+
+        # 非超管：公开 ∪ 自己写的 ∪ 所在团队（团队文档须已发布才可见）
+        scope = access_from_user(user)
+        if not scope.unrestricted:
+            if scope.teamIds:
+                vis_cond = or_(
+                    Document.author_id == scope.userId,
+                    and_(
+                        Document.status == DocumentStatus.Published,
+                        or_(
+                            Document.is_public.is_(True),
+                            Document.team_id.in_(scope.teamIds),
+                        ),
+                    ),
+                )
+            else:
+                vis_cond = or_(
+                    Document.author_id == scope.userId,
+                    and_(
+                        Document.status == DocumentStatus.Published,
+                        Document.is_public.is_(True),
+                    ),
+                )
+            stmt = stmt.where(vis_cond)
+            total_stmt = total_stmt.where(vis_cond)
 
         if query.title:
             cond = Document.title.ilike(f"%{query.title}%")
@@ -161,8 +193,16 @@ class DocumentService:
         total = (await session.execute(total_stmt)).scalar() or 0
         return {"items": items, "total": total, "page": page, "pageSize": page_size}
 
-    async def find_one(self, session: AsyncSession, doc_id: str, with_content: bool = True) -> dict:
+    async def find_one(
+        self,
+        session: AsyncSession,
+        doc_id: str,
+        with_content: bool = True,
+        user: dict | None = None,
+    ) -> dict:
         doc = await self._find_by_id_or_throw(session, doc_id)
+        if user is not None and not can_read_document(doc, access_from_user(user)):
+            raise HTTPException(403, "无权查看该文档")
         if not with_content:
             return _to_dict(doc)
         content = await self._load_content(doc.content_id)
@@ -171,7 +211,10 @@ class DocumentService:
     # ------------------------------------------------------------ 更新
     async def update(self, session: AsyncSession, doc_id: str, dto, actor: dict) -> dict:
         doc = await self._find_by_id_or_throw(session, doc_id)
+        self._assert_writable(doc, actor)
         old_status = doc.status
+        old_is_public = bool(doc.is_public)
+        old_team_id = doc.team_id or None
 
         if doc.status == DocumentStatus.PendingReview:
             if dto.content is not None or dto.title is not None:
@@ -229,8 +272,9 @@ class DocumentService:
         await session.flush()
         final_content = new_content if new_content is not None else await self._load_content(doc.content_id)
 
+        visibility_changed = bool(doc.is_public) != old_is_public or (doc.team_id or None) != old_team_id
         await self._sync_pipeline_after_update(
-            doc, old_status, doc.status, content_changed
+            doc, old_status, doc.status, content_changed, visibility_changed
         )
 
         return {**_to_dict(doc), "content": final_content}
@@ -239,6 +283,7 @@ class DocumentService:
     async def publish(self, session: AsyncSession, doc_id: str, actor: dict) -> dict:
         logger.info("发布文档：documentId=%s", doc_id)
         doc = await self._find_by_id_or_throw(session, doc_id)
+        self._assert_writable(doc, actor)
 
         if not self._can_publish_from(doc.status):
             raise HTTPException(400, "当前文档状态不允许发布")
@@ -255,6 +300,8 @@ class DocumentService:
 
     async def direct_publish(self, session: AsyncSession, doc_id: str, actor: dict | None = None) -> dict:
         doc = await self._find_by_id_or_throw(session, doc_id)
+        if actor is not None:
+            self._assert_writable(doc, actor)
         if doc.status not in (
             DocumentStatus.Draft,
             DocumentStatus.Published,
@@ -278,6 +325,7 @@ class DocumentService:
 
     async def archive(self, session: AsyncSession, doc_id: str, actor: dict) -> dict:
         doc = await self._find_by_id_or_throw(session, doc_id)
+        self._assert_writable(doc, actor)
         if not self._can_archive(doc.status):
             raise HTTPException(400, "只有已发布文档可以归档")
 
@@ -291,6 +339,7 @@ class DocumentService:
 
     async def save_as_draft(self, session: AsyncSession, doc_id: str, actor: dict) -> dict:
         doc = await self._find_by_id_or_throw(session, doc_id)
+        self._assert_writable(doc, actor)
         if doc.status != DocumentStatus.Published:
             raise HTTPException(400, "只有已发布文档可以保存为草稿")
 
@@ -304,6 +353,7 @@ class DocumentService:
 
     async def remove(self, session: AsyncSession, doc_id: str, actor: dict) -> dict:
         doc = await self._find_by_id_or_throw(session, doc_id)
+        self._assert_writable(doc, actor)
 
         if doc.status == DocumentStatus.Published:
             await self.safe_unpublish(doc_id)
@@ -388,7 +438,12 @@ class DocumentService:
 
     # ------------------------------------------------------------ 内部
     async def _sync_pipeline_after_update(
-        self, doc: Document, old_status: int, new_status: int, content_changed: bool
+        self,
+        doc: Document,
+        old_status: int,
+        new_status: int,
+        content_changed: bool,
+        visibility_changed: bool = False,
     ) -> None:
         was_published = old_status == DocumentStatus.Published
         is_published = new_status == DocumentStatus.Published
@@ -400,6 +455,16 @@ class DocumentService:
         if is_published and content_changed:
             if not self._review_service.is_require_approval():
                 await self.safe_publish(doc)
+            return
+
+        # 已发布文档只改公开/团队：三端（向量/搜索/图谱）同步可见性，不必重建
+        if is_published and visibility_changed and self._orchestrator is not None:
+            try:
+                await self._orchestrator.update_visibility(doc.id)
+            except Exception as err:
+                logger.warning(
+                    "可见性同步失败（不影响文档保存）：documentId=%s, %s", doc.id, err
+                )
 
     async def _load_content(self, content_id: str) -> str:
         content_doc = await self._content_repo.find_by_id(content_id)
@@ -423,6 +488,10 @@ class DocumentService:
         if not doc:
             raise HTTPException(404, f"Document {doc_id} not found")
         return doc
+
+    def _assert_writable(self, doc: Document, actor: dict) -> None:
+        if not can_write_document(doc, actor):
+            raise HTTPException(403, "无权修改该文档")
 
     def build_content_summary(self, content: str, max_len: int = 200) -> str:
         trimmed = re.sub(r"\s+", " ", content.strip())
